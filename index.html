@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flor por gestos — p5.js + ml5.js</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0b0c10;
+    --accent: #22d3ee;
+    --text: #e5e7eb;
+    --muted: #9ca3af;
+  }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    gap: 1rem;
+    padding: 1rem;
+  }
+  h1 { font-size: 1.5rem; font-weight: 600; letter-spacing: 0.5px; }
+
+  .stage {
+    position: relative;
+    display: inline-block;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+    max-width: 100%;
+  }
+  video {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-width: 640px;
+  }
+  #p5container {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+  #p5container canvas {
+    display: block;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  .estado {
+    font-size: 1.1rem;
+    font-weight: 600;
+    text-align: center;
+    margin-top: 0.5rem;
+    min-height: 1.4rem;
+  }
+  .estado.semilla { color: #a16207; }
+  .estado.tallo { color: #22c55e; }
+  .estado.flor { color: #ef4444; }
+  .estado.cayendo { color: #f472b6; }
+
+  button {
+    background: var(--accent);
+    color: #000;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    font-weight: 700;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 4px 14px rgba(34,211,238,0.35);
+    transition: background 0.2s ease, transform 0.1s ease;
+  }
+  button:hover { background: #67e8f9; }
+  button:active { transform: scale(0.97); }
+  button:disabled { background: #4b5563; color: #9ca3af; cursor: not-allowed; box-shadow: none; }
+
+  .leyenda {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 0.5rem;
+    max-width: 640px;
+    width: 100%;
+    text-align: center;
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-top: 0.5rem;
+  }
+  .leyenda div {
+    border: 1px solid #374151;
+    border-radius: 6px;
+    padding: 0.5rem;
+    background: #111827;
+  }
+  .leyenda div strong { color: var(--text); display: block; font-size: 0.9rem; }
+
+  .pista {
+    font-size: 0.85rem;
+    color: var(--muted);
+    text-align: center;
+    max-width: 640px;
+    line-height: 1.5;
+    margin-top: 0.5rem;
+  }
+
+  .debug {
+    font-size: 0.75rem;
+    color: #6b7280;
+    text-align: center;
+    margin-top: 0.25rem;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+
+<h1>🌸 Flor por gestos</h1>
+
+<div class="stage">
+  <video id="videoCam" playsinline muted autoplay></video>
+  <div id="p5container"></div>
+</div>
+
+<div class="estado" id="estado">Semilla</div>
+<div class="debug" id="debug">-</div>
+
+<button id="btnIniciar">Iniciar cámara</button>
+
+<div class="leyenda">
+  <div><strong>Semilla</strong><br>Inicio</div>
+  <div><strong>Mano abierta</strong><br>Florece</div>
+  <div><strong>Pellizco</strong><br>Cambiar color</div>
+  <div><strong>Puño</strong><br>Caer pétalos</div>
+</div>
+
+<p class="pista">Muestra una mano abierta para florecer, hace un pellizco (pulgar e índice juntos) para cambiar de color y un puño para hacer caer los pétalos y volver a semilla.</p>
+
+<!-- p5.js (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.0/p5.min.js"></script>
+<!-- p5.sound (CDN) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.11.0/addons/p5.sound.min.js"></script>
+<!-- TensorFlow.js y ml5.js (locales) -->
+<script src="libs/tf.min.js"></script>
+<script src="libs/ml5.min.js"></script>
+
+<script>
+/* ===================== CONFIG ===================== */
+let videoElement;
+let handpose;
+let predictions = [];
+
+let inicio = false;
+let pellizcoPrevio = false;
+const PALETA_PETALOS = [
+  '#ef4444', // rojo
+  '#f97316', // naranja
+  '#eab308', // amarillo
+  '#22c55e', // verde
+  '#3b82f6', // azul
+  '#a855f7', // púrpura
+  '#ec4899', // rosa
+  '#14b8a6'  // teal
+];
+
+let flor = {
+  etapa: 'semilla',      // semilla | tallo | flor | cayendo
+  escala: 1,
+  anguloPetalos: 0,
+  alturaTallo: 0,
+  petalosCayendo: [],
+  colorPetalos: '#ef4444',
+  indiceColor: 0
+};
+
+const CX = 320;
+const CY = 320;
+
+const btnIniciar = document.getElementById('btnIniciar');
+const estadoEl = document.getElementById('estado');
+const debugEl = document.getElementById('debug');
+const videoCam = document.getElementById('videoCam');
+
+function estadoTexto(etapa) {
+  const map = {
+    semilla: 'Semilla',
+    tallo: 'Tallo creciendo',
+    flor: 'Florecida',
+    cayendo: 'Pétalos cayendo'
+  };
+  return map[etapa] || etapa;
+}
+
+function setEstado(etapa) {
+  flor.etapa = etapa;
+  estadoEl.textContent = estadoTexto(etapa);
+  estadoEl.className = 'estado ' + etapa;
+}
+
+/* ===================== CLASIFICACIÓN DE GESTOS ===================== */
+function clasificarMano(landmarks) {
+  const dedos = [
+    { punta: 8, mcp: 5 },
+    { punta: 12, mcp: 9 },
+    { punta: 16, mcp: 13 },
+    { punta: 20, mcp: 17 }
+  ];
+
+  let extendidos = 0;
+  for (const d of dedos) {
+    const p = landmarks[d.punta];
+    const m = landmarks[d.mcp];
+    if (p && m && p[1] < m[1] - 15) extendidos++;
+  }
+
+  const puño = extendidos === 0;
+  const abierta = extendidos >= 3;
+
+  // Pellizco: punta del pulgar (4) y punta del índice (8) muy juntas
+  const pulgar = landmarks[4];
+  const indice = landmarks[8];
+  let pellizco = false;
+  if (pulgar && indice) {
+    const dist = Math.hypot(pulgar[0] - indice[0], pulgar[1] - indice[1]);
+    pellizco = dist < 40;
+  }
+
+  return { abierta, puño, pellizco, extendidos };
+}
+
+/* ===================== DIBUJO ===================== */
+function dibujarSemilla(cx, cy, escala) {
+  // Semilla: círculo café
+  noStroke();
+  fill('#8B4513');
+  circle(cx, cy, 24 * escala);
+  // brillito
+  fill('#A0522D');
+  circle(cx - 4 * escala, cy - 4 * escala, 8 * escala);
+}
+
+function dibujarTallo(cx, cyBase, altura, escala) {
+  stroke('#22c55e');
+  strokeWeight(6 * escala);
+  line(cx, cyBase, cx, cyBase - altura);
+
+  // Hojas
+  const hojaY = cyBase - altura * 0.4;
+  fill('#22c55e');
+  noStroke();
+  ellipse(cx - 22 * escala, hojaY, 26 * escala, 50 * escala);
+  ellipse(cx + 22 * escala, hojaY, 26 * escala, 50 * escala);
+}
+
+function dibujarCentro(cx, cy, escala) {
+  noStroke();
+  fill('#fbbf24');
+  circle(cx, cy, 24 * escala);
+}
+
+function dibujarPetalo(cx, cy, angulo, largo, ancho, color) {
+  push();
+  translate(cx, cy);
+  rotate(angulo);
+  fill(color);
+  noStroke();
+  ellipse(largo / 2, 0, largo, ancho);
+  pop();
+}
+
+function dibujarFlor(cx, cy, escala) {
+  // Pétalos alrededor del centro
+  const numPetalos = 8;
+  const radioPetalo = 42 * escala;
+  const largoPetalo = 30 * escala;
+  const anchoPetalo = 12 * escala;
+
+  for (let i = 0; i < numPetalos; i++) {
+    const ang = (i / numPetalos) * TWO_PI + flor.anguloPetalos;
+    const px = cx + cos(ang) * radioPetalo;
+    const py = cy + sin(ang) * radioPetalo;
+    dibujarPetalo(px, py, ang + HALF_PI, largoPetalo, anchoPetalo, flor.colorPetalos);
+  }
+
+  // Centro amarillo encima de los pétalos
+  dibujarCentro(cx, cy, escala);
+}
+
+function dibujarParticulas() {
+  for (const p of flor.petalosCayendo) {
+    fill(p.color);
+    noStroke();
+    circle(p.x, p.y, p.r * 2);
+  }
+}
+
+function actualizarParticulas() {
+  for (let i = flor.petalosCayendo.length - 1; i >= 0; i--) {
+    const p = flor.petalosCayendo[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.15;
+    p.vida--;
+    if (p.vida <= 0 || p.y > height + 50) {
+      flor.petalosCayendo.splice(i, 1);
+    }
+  }
+}
+
+function generarParticulasCaida(cx, cy, escala) {
+  const colores = ['#ef4444', '#fbbf24', '#f472b6'];
+  const cantidad = 18;
+  for (let i = 0; i < cantidad; i++) {
+    flor.petalosCayendo.push({
+      x: cx + random(-20, 20) * escala,
+      y: cy + random(-20, 20) * escala,
+      vx: random(-2, 2),
+      vy: -2 - random(3),
+      r: 1.5 + random(1.5),
+      color: colores[floor(random(colores.length))],
+      vida: 100 + random(60)
+    });
+  }
+}
+
+/* ===================== p5 SETUP ===================== */
+function setup() {
+  const cnv = createCanvas(640, 480);
+  cnv.parent('p5container');
+}
+
+function draw() {
+  // Canvas transparente para que el video se vea debajo
+  clear();
+
+  // Mostrar debug de manos detectadas
+  if (inicio && predictions) {
+    debugEl.textContent = 'Manos detectadas: ' + predictions.length;
+  }
+
+  // Dibujar flor
+  const escala = flor.escala;
+  const cx = CX;
+  const cy = CY;
+
+  if (flor.etapa === 'semilla') {
+    dibujarSemilla(cx, cy, escala);
+  } else {
+    dibujarTallo(cx, cy, flor.alturaTallo, escala);
+    const cyFlor = cy - flor.alturaTallo - 20;
+    if (flor.etapa === 'flor') {
+      dibujarFlor(cx, cyFlor, escala);
+    }
+    if (flor.etapa === 'cayendo') {
+      dibujarParticulas();
+    }
+  }
+
+  // Animaciones
+  if (flor.etapa === 'tallo') {
+    if (flor.alturaTallo < 200) flor.alturaTallo += 2;
+  }
+  if (flor.etapa === 'flor') {
+    flor.anguloPetalos += 0.02;
+    if (flor.alturaTallo < 200) flor.alturaTallo += 1;
+  }
+  if (flor.etapa === 'cayendo') {
+    actualizarParticulas();
+    if (flor.petalosCayendo.length === 0) {
+      setEstado('semilla');
+      flor.alturaTallo = 0;
+      flor.escala = 1;
+    }
+  }
+}
+
+/* ===================== LÓGICA DE GESTOS ===================== */
+function procesarGestos() {
+  if (!inicio || !handpose) {
+    requestAnimationFrame(procesarGestos);
+    return;
+  }
+
+  if (predictions.length > 0) {
+    let algunaAbierta = false;
+    let algunPuno = false;
+    let algunPellizco = false;
+
+    for (const prediction of predictions) {
+      const lm = prediction.landmarks;
+      if (lm && lm.length > 20) {
+        const g = clasificarMano(lm);
+        if (g.abierta) algunaAbierta = true;
+        if (g.puño) algunPuno = true;
+        if (g.pellizco) algunPellizco = true;
+      }
+    }
+
+    if (algunPellizco) {
+      // Pellizco: cambia el color de la flor (solo en la transición)
+      if (!pellizcoPrevio) {
+        flor.indiceColor = (flor.indiceColor + 1) % PALETA_PETALOS.length;
+        flor.colorPetalos = PALETA_PETALOS[flor.indiceColor];
+        // Si está florecida, el color se ve al instante
+        if (flor.etapa === 'semilla' || flor.etapa === 'tallo') {
+          setEstado('flor');
+          flor.alturaTallo = 200;
+        }
+      }
+    } else if (algunPuno) {
+      if (flor.etapa !== 'cayendo') {
+        setEstado('cayendo');
+        flor.petalosCayendo = [];
+        generarParticulasCaida(CX, CY - 100, flor.escala);
+        sonidoCaida();
+      }
+    } else if (algunaAbierta) {
+      // Una mano abierta: florece
+      if (flor.etapa === 'semilla') {
+        setEstado('tallo');
+      } else if (flor.etapa === 'tallo') {
+        setEstado('flor');
+      }
+    }
+
+    pellizcoPrevio = algunPellizco;
+  } else {
+    pellizcoPrevio = false;
+  }
+
+  requestAnimationFrame(procesarGestos);
+}
+
+/* ===================== SONIDO (p5.sound) ===================== */
+let osc;
+let sonidoListo = false;
+
+function sonidoCaida() {
+  if (!sonidoListo) return;
+  try {
+    // Tono descendente tipo "hojas cayendo"
+    if (osc) osc.stop();
+    osc = new p5.Oscillator('sine');
+    osc.freq(880);
+    osc.amp(0.3, 0.02);
+    osc.start();
+    // Desciende de frecuencia y volumen como pétalos cayendo
+    osc.freq(220, 0.7);
+    osc.amp(0, 0.7);
+    osc.stop(0.8);
+  } catch (e) {
+    console.warn('Sonido no disponible:', e);
+  }
+}
+
+/* ===================== BOTÓN INICIAR ===================== */
+btnIniciar.addEventListener('click', async () => {
+  try {
+    btnIniciar.disabled = true;
+    btnIniciar.textContent = 'Iniciando...';
+
+    // Iniciar audio de p5.sound (necesita gesto de usuario)
+    if (typeof getAudioContext === 'function') {
+      getAudioContext().resume();
+      sonidoListo = true;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: 640, height: 480 }
+    });
+    videoCam.srcObject = stream;
+    await new Promise((resolve) => {
+      videoCam.onloadedmetadata = () => resolve();
+    });
+    videoCam.play();
+
+    handpose = ml5.handpose(videoCam, () => {
+      console.log('Modelo Handpose listo');
+      inicio = true;
+      setEstado('semilla');
+      btnIniciar.textContent = 'Cámara activa';
+      procesarGestos();
+    });
+
+    handpose.on('predict', (resultados) => {
+      predictions = resultados;
+    });
+
+  } catch (err) {
+    console.error(err);
+    btnIniciar.disabled = false;
+    btnIniciar.textContent = 'Iniciar cámara';
+    estadoEl.textContent = 'Error: no se pudo acceder a la cámara.';
+    estadoEl.style.color = '#ef4444';
+  }
+});
+</script>
+
+</body>
+</html>
